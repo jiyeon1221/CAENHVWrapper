@@ -42,7 +42,7 @@
    ========================= */
 #define DEFAULT_SYSTEM	SY4527
 #define DEFAULT_LINK	LINKTYPE_TCPIP
-#define DEFAULT_HOST	"192.168.0.1"
+#define DEFAULT_HOST	"192.168.100.2"
 #define DEFAULT_USER	"admin"
 #define DEFAULT_PASS	"admin"
 #define DEFAULT_SLOT	3
@@ -97,7 +97,9 @@ static int parse_float_token(const char *s, float *out)
 static int load_config_file(const char *path,
 	unsigned short **outChList, int *outCount,
 	float **outV0List, float **outI0List,
-	float **outSVMaxList, char ***outNameList)
+	float **outSVMaxList,
+	float **outRampUpList, float **outRampDownList,
+	char ***outNameList)
 {
 	FILE *fp = fopen(path, "r");
 	if(!fp) return -1;
@@ -106,6 +108,8 @@ static int load_config_file(const char *path,
 	float *v0Vec = NULL;
 	float *i0Vec = NULL;
 	float *svVec = NULL;
+	float *ruVec = NULL;
+	float *rdVec = NULL;
 	char **nameVec = NULL;
 	int cap = 0;
 	int len = 0;
@@ -151,6 +155,22 @@ static int load_config_file(const char *path,
 		int hasSV = 0;
 		if(tok && parse_float_token(tok, &svmax)) {
 			hasSV = 1;
+			tok = strtok(NULL, delims);
+		}
+
+		/* sixth: optional RampUp */
+		float rampup = 0.0f;
+		int hasRU = 0;
+		if(tok && parse_float_token(tok, &rampup)) {
+			hasRU = 1;
+			tok = strtok(NULL, delims);
+		}
+
+		/* seventh: optional RampDown */
+		float rampdown = 0.0f;
+		int hasRD = 0;
+		if(tok && parse_float_token(tok, &rampdown)) {
+			hasRD = 1;
 		}
 
 		if(is_channel_excluded((unsigned short)ch))
@@ -162,18 +182,24 @@ static int load_config_file(const char *path,
 			float *nv0 = (float*)realloc(v0Vec, sizeof(float) * (size_t)ncap);
 			float *ni0 = (float*)realloc(i0Vec, sizeof(float) * (size_t)ncap);
 			float *nsv = (float*)realloc(svVec, sizeof(float) * (size_t)ncap);
+			float *nru = (float*)realloc(ruVec, sizeof(float) * (size_t)ncap);
+			float *nrd = (float*)realloc(rdVec, sizeof(float) * (size_t)ncap);
 			char **nname = (char**)realloc(nameVec, sizeof(char*) * (size_t)ncap);
-			if(!nch || !nv0 || !ni0 || !nsv || !nname) {
+			if(!nch || !nv0 || !ni0 || !nsv || !nru || !nrd || !nname) {
 				if(nch) chVec = nch;
 				if(nv0) v0Vec = nv0;
 				if(ni0) i0Vec = ni0;
 				if(nsv) svVec = nsv;
+				if(nru) ruVec = nru;
+				if(nrd) rdVec = nrd;
 				if(nname) nameVec = nname;
 				fclose(fp);
 				free(chVec);
 				free(v0Vec);
 				free(i0Vec);
 				free(svVec);
+				free(ruVec);
+				free(rdVec);
 				if(nameVec) {
 					for(int ii = 0; ii < len; ii++) free(nameVec[ii]);
 				}
@@ -184,6 +210,8 @@ static int load_config_file(const char *path,
 			v0Vec = nv0;
 			i0Vec = ni0;
 			svVec = nsv;
+			ruVec = nru;
+			rdVec = nrd;
 			nameVec = nname;
 			cap = ncap;
 		}
@@ -191,6 +219,8 @@ static int load_config_file(const char *path,
 		v0Vec[len] = v0;
 		i0Vec[len] = i0;
 		svVec[len] = hasSV ? svmax : 0.0f;
+		ruVec[len] = hasRU ? rampup : 0.0f;
+		rdVec[len] = hasRD ? rampdown : 0.0f;
 		/* copy name token */
 		size_t nlen = strlen(nameTok);
 		nameVec[len] = (char*)malloc(nlen + 1);
@@ -206,6 +236,8 @@ static int load_config_file(const char *path,
 		free(v0Vec);
 		free(i0Vec);
 		free(svVec);
+		free(ruVec);
+		free(rdVec);
 		if(nameVec) {
 			/* No entries; but ensure no leak */
 			free(nameVec);
@@ -217,6 +249,8 @@ static int load_config_file(const char *path,
 	*outV0List = v0Vec;
 	*outI0List = i0Vec;
 	if(outSVMaxList) *outSVMaxList = svVec; else free(svVec);
+	if(outRampUpList) *outRampUpList = ruVec; else free(ruVec);
+	if(outRampDownList) *outRampDownList = rdVec; else free(rdVec);
 	if(outNameList) *outNameList = nameVec; else {
 		if(nameVec) {
 			for(int ii = 0; ii < len; ii++) free(nameVec[ii]);
@@ -228,9 +262,10 @@ static int load_config_file(const char *path,
 }
 
 static int load_default_config(unsigned short **outChList, int *outCount,
-	float **outV0List, float **outI0List, float **outSVMaxList, char ***outNameList)
+	float **outV0List, float **outI0List, float **outSVMaxList,
+	float **outRampUpList, float **outRampDownList, char ***outNameList)
 {
-	return load_config_file(DEFAULT_CONFIG_PATH, outChList, outCount, outV0List, outI0List, outSVMaxList, outNameList);
+	return load_config_file(DEFAULT_CONFIG_PATH, outChList, outCount, outV0List, outI0List, outSVMaxList, outRampUpList, outRampDownList, outNameList);
 }
 
 typedef void (*P_FUN)(void);
@@ -476,23 +511,37 @@ static int read_conn_from_ch_config(const char *path,
 	return mask;
 }
 
-/* Map Status bitfield to a concise human-readable label */
+/* Map Status bitfield to a human-readable label.
+   Fault flags are all shown (no priority among them).
+   Channel state (On/Off/Up/Down) shows only the highest-priority one. */
 static const char *status_label(uint32_t v) {
-	if(v & (1u << 3))  return "Over Current";
-	if(v & (1u << 4))  return "Over Voltage";
-	if(v & (1u << 9))  return "Internal Trip";
-	if(v & (1u << 6))  return "External Trip";
-	if(v & (1u << 15)) return "Temperature Error";
-	if(v & (1u << 14)) return "Power Failure";
-	if(v & (1u << 13)) return "Over Voltage Protection";
-	if(v & (1u << 5))  return "Under Voltage";
-	if(v & (1u << 7))  return "Max Voltage";
-	if(v & (1u << 8))  return "External Disable";
-	if(v & (1u << 10)) return "Calibration Error";
-	if(v & (1u << 11)) return "Unplugged";
-	if(v & (1u << 1))  return "Up";
-	if(v & (1u << 2))  return "Down";
-	if(v & (1u << 0))  return "On";
+	static char buf[256];
+	static const struct { uint32_t bit; const char *name; } faults[] = {
+		{ 1u << 3,  "Over Current" },
+		{ 1u << 4,  "Over Voltage" },
+		{ 1u << 9,  "Internal Trip" },
+		{ 1u << 6,  "External Trip" },
+		{ 1u << 15, "Temperature Error" },
+		{ 1u << 14, "Power Failure" },
+		{ 1u << 13, "Over Voltage Protection" },
+		{ 1u << 5,  "Under Voltage" },
+		{ 1u << 7,  "Max Voltage" },
+		{ 1u << 8,  "External Disable" },
+		{ 1u << 10, "Calibration Error" },
+		{ 1u << 11, "Unplugged" },
+	};
+	/* Priority: faults (all shown) > Up/Down (one) > On/Off (one) */
+	buf[0] = '\0';
+	for(int i = 0; i < (int)(sizeof(faults)/sizeof(faults[0])); i++) {
+		if(v & faults[i].bit) {
+			if(buf[0] != '\0') strncat(buf, "+", sizeof(buf) - strlen(buf) - 1);
+			strncat(buf, faults[i].name, sizeof(buf) - strlen(buf) - 1);
+		}
+	}
+	if(buf[0]) return buf;
+	if     (v & (1u << 1)) return "Up";
+	else if(v & (1u << 2)) return "Down";
+	else if(v & (1u << 0)) return "On";
 	return "Off";
 }
 
@@ -683,8 +732,8 @@ static int run_cli(int argc, char **argv) {
 			float *cfgI0 = NULL;
 			int cfgCount = 0;
 			int lr = -1;
-			if(configPath) lr = load_config_file(configPath, &cfgCh, &cfgCount, &cfgV0, &cfgI0, NULL, NULL);
-			if(lr < 0) lr = load_default_config(&cfgCh, &cfgCount, &cfgV0, &cfgI0, NULL, NULL);
+			if(configPath) lr = load_config_file(configPath, &cfgCh, &cfgCount, &cfgV0, &cfgI0, NULL, NULL, NULL, NULL);
+			if(lr < 0) lr = load_default_config(&cfgCh, &cfgCount, &cfgV0, &cfgI0, NULL, NULL, NULL, NULL);
 			if(lr <= 0) {
 				fprintf(stderr, "No channels provided and config not found or empty. Provide --ch or a valid config.\n");
 				return 2;
@@ -809,9 +858,9 @@ static int run_cli(int argc, char **argv) {
 			int lr = -1;
 
 			if(configPath)
-				lr = load_config_file(configPath, &cfgCh, &cfgCount, &cfgV0, &cfgI0, NULL, NULL);
+				lr = load_config_file(configPath, &cfgCh, &cfgCount, &cfgV0, &cfgI0, NULL, NULL, NULL, NULL);
 			if(lr < 0)
-				lr = load_default_config(&cfgCh, &cfgCount, &cfgV0, &cfgI0, NULL, NULL);
+				lr = load_default_config(&cfgCh, &cfgCount, &cfgV0, &cfgI0, NULL, NULL, NULL, NULL);
 
 			if(lr <= 0 || cfgCh == NULL || cfgCount <= 0) {
 				fprintf(stderr, "Unable to determine channel list for '--ch all'. "
@@ -869,9 +918,9 @@ static int run_cli(int argc, char **argv) {
 		char **cfgNames = NULL;
 		int lrNames = -1;
 		if(configPath)
-			lrNames = load_config_file(configPath, &cfgChForNames, &cfgCntForNames, &cfgTmpV0, &cfgTmpI0, &cfgTmpSV, &cfgNames);
+			lrNames = load_config_file(configPath, &cfgChForNames, &cfgCntForNames, &cfgTmpV0, &cfgTmpI0, &cfgTmpSV, NULL, NULL, &cfgNames);
 		if(lrNames < 0)
-			lrNames = load_default_config(&cfgChForNames, &cfgCntForNames, &cfgTmpV0, &cfgTmpI0, &cfgTmpSV, &cfgNames);
+			lrNames = load_default_config(&cfgChForNames, &cfgCntForNames, &cfgTmpV0, &cfgTmpI0, &cfgTmpSV, NULL, NULL, &cfgNames);
 		/* Fetch all requested parameters first */
 		for(int gi = 0; gi < getCount; gi++) {
 			const char *par = getParams[gi];
@@ -976,15 +1025,17 @@ static int run_cli(int argc, char **argv) {
 		{
 			int hasPwSetter2 = 0;
 			for(int pi = 0; pi < paramCount; pi++) if(str_ieq(params[pi].name, "Pw")) { hasPwSetter2 = 1; break; }
-			if(hasPwSetter2 && !chAll) {
+			if(hasPwSetter2) {
 				unsigned short *cfgCh = NULL;
 				float *cfgV0 = NULL;
 				float *cfgI0 = NULL;
 				float *cfgSV = NULL;
+				float *cfgRU = NULL;
+				float *cfgRD = NULL;
 				int cfgCount = 0;
 				int lr = -1;
-				if(configPath) lr = load_config_file(configPath, &cfgCh, &cfgCount, &cfgV0, &cfgI0, &cfgSV, NULL);
-				if(lr < 0) lr = load_default_config(&cfgCh, &cfgCount, &cfgV0, &cfgI0, &cfgSV, NULL);
+				if(configPath) lr = load_config_file(configPath, &cfgCh, &cfgCount, &cfgV0, &cfgI0, &cfgSV, &cfgRU, &cfgRD, NULL);
+				if(lr < 0) lr = load_default_config(&cfgCh, &cfgCount, &cfgV0, &cfgI0, &cfgSV, &cfgRU, &cfgRD, NULL);
 				if(lr > 0) {
 					for(int idx = 0; idx < cfgCount; idx++) {
 						unsigned short oneCh = cfgCh[idx];
@@ -995,6 +1046,22 @@ static int run_cli(int argc, char **argv) {
 							if(sr0 != CAENHV_OK) {
 								fprintf(stderr, "SetChParam('SVMax', %.3f) ch %u failed: %s (code %d)\n", (double)sv, oneCh, CAENHV_GetError(handle), sr0);
 								exitCode = (int)sr0;
+							}
+						}
+						if(cfgRU && cfgRU[idx] > 0.0f) {
+							float ru = cfgRU[idx];
+							CAENHVRESULT sr = CAENHV_SetChParam(handle, (unsigned short)slot, "RUp", 1, &oneCh, &ru);
+							if(sr != CAENHV_OK) {
+								fprintf(stderr, "SetChParam('RUp', %.3f) ch %u failed: %s (code %d)\n", (double)ru, oneCh, CAENHV_GetError(handle), sr);
+								exitCode = (int)sr;
+							}
+						}
+						if(cfgRD && cfgRD[idx] > 0.0f) {
+							float rd = cfgRD[idx];
+							CAENHVRESULT sr = CAENHV_SetChParam(handle, (unsigned short)slot, "RDWn", 1, &oneCh, &rd);
+							if(sr != CAENHV_OK) {
+								fprintf(stderr, "SetChParam('RDWn', %.3f) ch %u failed: %s (code %d)\n", (double)rd, oneCh, CAENHV_GetError(handle), sr);
+								exitCode = (int)sr;
 							}
 						}
 						float v0 = cfgV0[idx];
@@ -1015,6 +1082,8 @@ static int run_cli(int argc, char **argv) {
 				free(cfgV0);
 				free(cfgI0);
 				free(cfgSV);
+				free(cfgRU);
+				free(cfgRD);
 			}
 		}
 		for(i = 0; i < paramCount; i++) {

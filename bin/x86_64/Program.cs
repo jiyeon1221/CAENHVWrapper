@@ -31,7 +31,7 @@ static class HV
 
 class Program
 {
-    const string FIXED_IP   = "192.168.0.1";
+    const string FIXED_IP   = "192.168.100.2";
     const string FIXED_USER = "admin";
     const string FIXED_PASS = "admin";
     const int SYSTEM_TYPE = 2; // SY4527
@@ -419,7 +419,7 @@ class Program
         if (args.Length == 0 || args[0] == "--help" || args[0] == "-h")
         {
             Console.WriteLine(
-@"hvctl (Linux build, SY4527 @ 192.168.0.1 / admin)
+@"hvctl (Linux build, SY4527 @ 192.168.100.2 / admin)
 
 USAGE:
   hvctl check
